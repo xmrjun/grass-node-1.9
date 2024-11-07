@@ -35,17 +35,23 @@ async function main() {
     
     const clients = proxies.map(proxy => new GrassClient(userId, proxy));
     
-    // Start clients with a small delay between each
-    for (const client of clients) {
-      client.start().catch(error => {
-        logger.error(`Failed to start client: ${error.message}`);
-      });
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
+    // 启动所有客户端并保持运行
+    await Promise.all(clients.map(client => client.start()));
   } catch (error) {
     logger.error(`Error: ${error.message}`);
-    process.exit(1);
+    // 不要退出进程，等待5秒后重试
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    main();
   }
 }
+
+// 捕获未处理的异常，防止程序崩溃
+process.on('uncaughtException', (error) => {
+  logger.error(`Uncaught Exception: ${error.message}`);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+});
 
 main();

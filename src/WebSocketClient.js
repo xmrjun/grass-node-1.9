@@ -9,17 +9,27 @@ export class WebSocketClient {
     this.proxy = proxy;
     this.ws = null;
     this.retryCount = 0;
-    this.maxRetries = 10;
+    this.maxRetries = 20; // 增加最大重试次数
     this.heartbeatInterval = null;
     this.reconnectTimeout = null;
     this.isAuthenticated = false;
     this.browserId = uuid();
     this.proxyManager = new ProxyManager();
+    this.connectionAttempts = 0;
+    this.lastConnectTime = 0;
   }
 
   async connect() {
-    while (this.retryCount < this.maxRetries) {
+    while (this.connectionAttempts < this.maxRetries) {
       try {
+        // 检查上次连接时间,避免频繁重连
+        const now = Date.now();
+        const timeSinceLastConnect = now - this.lastConnectTime;
+        if (timeSinceLastConnect < 5000) {
+          await new Promise(resolve => setTimeout(resolve, 5000 - timeSinceLastConnect));
+        }
+        this.lastConnectTime = Date.now();
+
         if (!this.proxyManager.isViable(this.proxy)) {
           throw new Error('Proxy is currently blocked');
         }
@@ -29,29 +39,35 @@ export class WebSocketClient {
         this.ws = new WebSocket('wss://proxy2.wynd.network:4650', {
           headers: this.getHeaders(),
           agent,
-          handshakeTimeout: 15000,
-          followRedirects: true
+          handshakeTimeout: 30000, // 增加超时时间
+          followRedirects: true,
+          maxPayload: 1024 * 1024 // 1MB
         });
 
         await this.setupWebSocket();
         await this.authenticate();
         this.startHeartbeat();
-        this.retryCount = 0;
+        
+        // 重置重试计数
+        this.connectionAttempts = 0;
         this.proxyManager.trackStatus(this.proxy, true);
         return true;
       } catch (error) {
+        this.connectionAttempts++;
         this.proxyManager.trackStatus(this.proxy, false);
         this.cleanup();
         
-        this.retryCount++;
-        logger.error(`Connection failed (${this.retryCount}/${this.maxRetries}): ${error.message}`);
+        // 计算递增的重试延迟
+        const delay = Math.min(1000 * Math.pow(2, this.connectionAttempts), 30000);
+        logger.error(`Connection attempt ${this.connectionAttempts}/${this.maxRetries} failed: ${error.message}`);
+        logger.info(`Retrying in ${delay/1000} seconds...`);
         
-        if (this.retryCount === this.maxRetries) {
+        if (this.connectionAttempts === this.maxRetries) {
           logger.error('Max retries reached, stopping connection attempts');
           return false;
         }
         
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
     return false;
@@ -75,7 +91,8 @@ export class WebSocketClient {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Connection timeout'));
-      }, 15000);
+        this.cleanup();
+      }, 30000);
 
       this.ws.on('open', () => {
         clearTimeout(timeout);
@@ -93,6 +110,15 @@ export class WebSocketClient {
       });
 
       this.ws.on('message', (data) => this.handleMessage(data));
+
+      // 添加ping/pong处理
+      this.ws.on('ping', () => {
+        try {
+          this.ws.pong();
+        } catch (error) {
+          logger.error(`Failed to send pong: ${error.message}`);
+        }
+      });
     });
   }
 
@@ -100,7 +126,8 @@ export class WebSocketClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, 15000);
+        this.cleanup();
+      }, 30000);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
@@ -134,6 +161,10 @@ export class WebSocketClient {
   }
 
   startHeartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+    
     this.heartbeatInterval = setInterval(async () => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         try {
@@ -149,6 +180,7 @@ export class WebSocketClient {
           });
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
+          this.handleDisconnect();
         }
       }
     }, 30000);
@@ -158,10 +190,13 @@ export class WebSocketClient {
     logger.warn(`WebSocket closed (${this.proxy || 'direct connection'})`);
     this.cleanup();
     
-    if (this.retryCount < this.maxRetries) {
+    // 使用递增的重连延迟
+    const delay = Math.min(1000 * Math.pow(2, this.connectionAttempts), 30000);
+    
+    if (this.connectionAttempts < this.maxRetries) {
       this.reconnectTimeout = setTimeout(() => {
         this.connect().catch(() => {});
-      }, 5000);
+      }, delay);
     }
   }
 
@@ -170,7 +205,13 @@ export class WebSocketClient {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return reject(new Error('WebSocket not connected'));
       }
+      
+      const timeout = setTimeout(() => {
+        reject(new Error('Send message timeout'));
+      }, 10000);
+
       this.ws.send(JSON.stringify(payload), (error) => {
+        clearTimeout(timeout);
         if (error) reject(error);
         else resolve();
       });
@@ -184,7 +225,9 @@ export class WebSocketClient {
         this.sendMessage({
           id: message.id,
           origin_action: 'PONG'
-        }).catch(() => {});
+        }).catch(error => {
+          logger.error(`Failed to send PONG: ${error.message}`);
+        });
       }
     } catch (error) {
       logger.error(`Failed to handle message: ${error.message}`);

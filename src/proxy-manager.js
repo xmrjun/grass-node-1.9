@@ -1,52 +1,66 @@
 import pkg from 'https-proxy-agent';
 const { HttpsProxyAgent } = pkg;
+import { logger } from './logger.js';
 
 export class ProxyManager {
   constructor() {
     this.proxyStatus = new Map();
-    this.failureThreshold = 3;
-    this.successThreshold = 5;
-    this.retryTimeout = 300000; // 5 minutes
+    this.failureThreshold = 5; // 增加失败阈值
+    this.successThreshold = 3;
+    this.retryTimeout = 120000; // 增加重试超时
   }
 
-  validateProxy(proxy) {
-    if (!proxy) return true;
-    
-    const proxyRegex = /^(http|https|socks[45]):\/\/([^:]+:[^@]+@)?([a-zA-Z0-9.-]+):\d{1,5}$/;
-    return proxyRegex.test(proxy);
-  }
-
-  createAgent(proxy) {
-    if (!proxy) return null;
+  createAgent(proxyUrl) {
+    if (!proxyUrl) return null;
     
     try {
-      return new HttpsProxyAgent(proxy);
+      const url = new URL(proxyUrl);
+      return new HttpsProxyAgent({
+        protocol: url.protocol,
+        host: url.hostname,
+        port: url.port,
+        auth: url.username && url.password ? 
+          `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}` : 
+          undefined,
+        rejectUnauthorized: false,
+        timeout: 30000,
+        keepAlive: true,
+        keepAliveMsecs: 30000,
+        maxSockets: 1
+      });
     } catch (error) {
-      console.error(`Failed to create proxy agent: ${error.message}`);
+      logger.error(`Invalid proxy URL: ${proxyUrl}`);
       return null;
     }
   }
 
-  trackProxyStatus(proxy, success) {
+  trackStatus(proxy, success) {
     if (!proxy) return;
     
     if (!this.proxyStatus.has(proxy)) {
-      this.proxyStatus.set(proxy, { failures: 0, successes: 0, lastFailure: 0 });
+      this.proxyStatus.set(proxy, { 
+        failures: 0, 
+        successes: 0, 
+        lastFailure: 0,
+        lastSuccess: 0
+      });
     }
 
     const status = this.proxyStatus.get(proxy);
+    const now = Date.now();
     
     if (success) {
       status.successes++;
       status.failures = 0;
+      status.lastSuccess = now;
     } else {
       status.failures++;
       status.successes = 0;
-      status.lastFailure = Date.now();
+      status.lastFailure = now;
     }
   }
 
-  isProxyViable(proxy) {
+  isViable(proxy) {
     if (!proxy) return true;
     
     const status = this.proxyStatus.get(proxy);
@@ -57,25 +71,15 @@ export class ProxyManager {
       if (timeSinceLastFailure < this.retryTimeout) {
         return false;
       }
-      // Reset proxy status after timeout
-      this.proxyStatus.set(proxy, { failures: 0, successes: 0, lastFailure: 0 });
+      // 重置状态
+      this.proxyStatus.set(proxy, { 
+        failures: 0, 
+        successes: 0, 
+        lastFailure: 0,
+        lastSuccess: 0
+      });
     }
     
     return true;
-  }
-
-  getProxyHealth(proxy) {
-    if (!proxy) return 'direct';
-    
-    const status = this.proxyStatus.get(proxy);
-    if (!status) return 'unknown';
-    
-    if (status.failures >= this.failureThreshold) return 'failed';
-    if (status.successes >= this.successThreshold) return 'healthy';
-    return 'testing';
-  }
-
-  resetProxy(proxy) {
-    this.proxyStatus.delete(proxy);
   }
 }
