@@ -1,7 +1,8 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
+import pkg from 'https-proxy-agent';
+const { HttpsProxyAgent } = pkg;
 import { logger } from './logger.js';
-import { Agent } from 'https';
 
 export class GrassClient {
   constructor(userId, proxy = null) {
@@ -10,12 +11,10 @@ export class GrassClient {
     this.ws = null;
     this.browserId = uuidv4();
     this.heartbeatInterval = null;
-    this.retryCount = 0;
-    this.maxRetries = 10;
   }
 
   async start() {
-    while (this.retryCount < this.maxRetries) {
+    while (true) {
       try {
         await this.connect();
         await this.authenticate();
@@ -29,12 +28,11 @@ export class GrassClient {
         });
         
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       } catch (error) {
-        this.retryCount++;
         logger.error(`Connection error: ${error.message}`);
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
   }
@@ -46,20 +44,16 @@ export class GrassClient {
         'Connection': 'Upgrade',
         'Pragma': 'no-cache',
         'Cache-Control': 'no-cache',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.0.0 Safari/537.36',
         'Upgrade': 'websocket',
         'Origin': 'https://app.getgrass.io',
         'Sec-WebSocket-Version': '13',
         'Accept-Language': 'en-US,en;q=0.9'
-      },
-      agent: new Agent({
-        rejectUnauthorized: false,
-        keepAlive: true
-      })
+      }
     };
 
     if (this.proxy) {
-      options.proxy = this.proxy;
+      options.agent = new HttpsProxyAgent(this.proxy);
     }
 
     return new Promise((resolve, reject) => {
@@ -70,7 +64,7 @@ export class GrassClient {
           this.ws.terminate();
         }
         reject(new Error('Connection timeout'));
-      }, 30000);
+      }, 15000);
 
       this.ws.once('open', () => {
         clearTimeout(timeout);
@@ -89,7 +83,7 @@ export class GrassClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, 30000);
+      }, 15000);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
@@ -112,11 +106,10 @@ export class GrassClient {
       result: {
         browser_id: this.browserId,
         user_id: this.userId,
-        user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.0.0 Safari/537.36',
         timestamp: Math.floor(Date.now() / 1000),
         device_type: 'community',
-        version: '2.0.0',
-        platform: 'desktop'
+        version: '2.0.0'
       }
     };
     await this.sendMessage(payload);
