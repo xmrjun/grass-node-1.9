@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from './logger.js';
 import { Agent } from 'https';
+import { ProxyManager } from './proxy-manager.js';
 
 export class GrassClient {
   constructor(userId, proxy = null) {
@@ -13,10 +14,14 @@ export class GrassClient {
     this.reconnectTimeout = null;
     this.isAuthenticated = false;
     this.connectionAttempts = 0;
-    this.maxRetries = 10;
-    this.backoffDelay = 1000;
-    this.maxBackoffDelay = 30000;
+    this.maxRetries = 20; // 增加重试次数以提高稳定性
+    this.backoffDelay = 2000; // 初始重试延迟
+    this.maxBackoffDelay = 60000; // 最大重试延迟
     this.isShuttingDown = false;
+    this.proxyManager = new ProxyManager();
+    this.lastConnectTime = 0;
+    this.connectTimeout = 45000; // 增加连接超时时间
+    this.successfulConnections = 0;
   }
 
   async start() {
@@ -25,18 +30,30 @@ export class GrassClient {
     
     while (!this.isShuttingDown) {
       try {
-        if (this.connectionAttempts >= this.maxRetries) {
-          logger.warn(`Maximum retry attempts (${this.maxRetries}) reached for proxy: ${this.proxy}`);
-          this.connectionAttempts = 0;
+        // 检查代理可用性
+        if (!this.proxyManager.isProxyViable(this.proxy)) {
+          logger.warn(`Proxy ${this.proxy} is currently blocked, waiting for cooldown...`);
           await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
           continue;
         }
 
+        // 连接限制检查
+        const now = Date.now();
+        const timeSinceLastConnect = now - this.lastConnectTime;
+        if (timeSinceLastConnect < 5000) {
+          await new Promise(resolve => setTimeout(resolve, 5000 - timeSinceLastConnect));
+        }
+        this.lastConnectTime = now;
+
         await this.connect();
         await this.authenticate();
         this.startHeartbeat();
+        
+        this.successfulConnections++;
         this.connectionAttempts = 0;
+        this.proxyManager.trackProxyStatus(this.proxy, true);
 
+        // 等待连接关闭
         await new Promise((resolve) => {
           this.ws.once('close', () => {
             logger.warn(`Connection closed for proxy: ${this.proxy}`);
@@ -46,30 +63,24 @@ export class GrassClient {
 
       } catch (error) {
         this.connectionAttempts++;
-        const delay = Math.min(this.backoffDelay * Math.pow(2, this.connectionAttempts - 1), this.maxBackoffDelay);
+        this.proxyManager.trackProxyStatus(this.proxy, false);
+        
+        const delay = Math.min(this.backoffDelay * Math.pow(1.5, this.connectionAttempts - 1), this.maxBackoffDelay);
         
         if (error.message.includes('404')) {
           logger.error(`Server endpoint not found (404). Waiting longer before retry...`);
           await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
+        } else if (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
+          logger.error(`Network error (${error.code}). Retrying in ${Math.floor(delay/1000)}s...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
         } else {
-          const errorMessage = this.getErrorMessage(error);
-          logger.error(`Connection error (attempt ${this.connectionAttempts}): ${errorMessage}`);
+          logger.error(`Connection error (attempt ${this.connectionAttempts}): ${error.message}`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       } finally {
         this.cleanup();
       }
     }
-  }
-
-  getErrorMessage(error) {
-    if (error.code === 'ECONNRESET') {
-      return 'Connection reset by peer';
-    }
-    if (error.code === 'ETIMEDOUT') {
-      return 'Connection timed out';
-    }
-    return error.message;
   }
 
   async connect() {
@@ -85,14 +96,15 @@ export class GrassClient {
         'Sec-WebSocket-Version': '13',
         'Accept-Language': 'en-US,en;q=0.9'
       },
-      timeout: 30000,
+      timeout: this.connectTimeout,
       followRedirects: true,
       maxPayload: 1024 * 1024,
       rejectUnauthorized: false,
       agent: new Agent({
         rejectUnauthorized: false,
         keepAlive: true,
-        timeout: 30000
+        keepAliveMsecs: 30000,
+        timeout: this.connectTimeout
       })
     };
 
@@ -109,7 +121,7 @@ export class GrassClient {
             this.ws.terminate();
             reject(new Error('Connection timeout'));
           }
-        }, 30000);
+        }, this.connectTimeout);
 
         this.ws.once('open', () => {
           clearTimeout(connectionTimeout);
@@ -125,6 +137,15 @@ export class GrassClient {
         this.ws.on('unexpected-response', (request, response) => {
           clearTimeout(connectionTimeout);
           reject(new Error(`Unexpected server response: ${response.statusCode}`));
+        });
+
+        // 处理 ping/pong
+        this.ws.on('ping', () => {
+          try {
+            this.ws.pong();
+          } catch (error) {
+            logger.error(`Failed to send pong: ${error.message}`);
+          }
         });
 
       } catch (error) {
@@ -239,5 +260,6 @@ export class GrassClient {
   shutdown() {
     this.isShuttingDown = true;
     this.cleanup();
+    logger.info('Client shutdown initiated');
   }
 }
