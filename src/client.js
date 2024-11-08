@@ -14,13 +14,13 @@ export class GrassClient {
     this.reconnectTimeout = null;
     this.isAuthenticated = false;
     this.connectionAttempts = 0;
-    this.maxRetries = 20;
-    this.backoffDelay = 2000;
-    this.maxBackoffDelay = 60000;
+    this.maxRetries = 50;
+    this.backoffDelay = 1000;
+    this.maxBackoffDelay = 30000;
     this.isShuttingDown = false;
     this.proxyManager = new ProxyManager();
     this.lastConnectTime = 0;
-    this.connectTimeout = 45000;
+    this.connectTimeout = 30000;
     this.successfulConnections = 0;
   }
 
@@ -31,15 +31,15 @@ export class GrassClient {
     while (!this.isShuttingDown) {
       try {
         if (!this.proxyManager.isProxyViable(this.proxy)) {
-          logger.warn(`Proxy ${this.proxy} is currently blocked, waiting for cooldown...`);
-          await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
+          logger.warn(`Proxy ${this.proxy} is temporarily blocked, waiting...`);
+          await new Promise(resolve => setTimeout(resolve, 15000));
           continue;
         }
 
         const now = Date.now();
         const timeSinceLastConnect = now - this.lastConnectTime;
-        if (timeSinceLastConnect < 5000) {
-          await new Promise(resolve => setTimeout(resolve, 5000 - timeSinceLastConnect));
+        if (timeSinceLastConnect < 3000) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
         }
         this.lastConnectTime = now;
 
@@ -64,9 +64,12 @@ export class GrassClient {
         
         const delay = Math.min(this.backoffDelay * Math.pow(1.5, this.connectionAttempts - 1), this.maxBackoffDelay);
         
-        if (error.message.includes('404')) {
-          logger.error(`Server endpoint not found (404). Waiting longer before retry...`);
-          await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
+        if (error.message.includes('504') || error.message.includes('502')) {
+          logger.error(`Gateway error (${error.message}). Short retry in 3s...`);
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        } else if (error.message.includes('404')) {
+          logger.error(`Server endpoint not found (404). Waiting...`);
+          await new Promise(resolve => setTimeout(resolve, 10000));
         } else if (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT') {
           logger.error(`Network error (${error.code}). Retrying in ${Math.floor(delay/1000)}s...`);
           await new Promise(resolve => setTimeout(resolve, delay));
@@ -91,11 +94,13 @@ export class GrassClient {
         'Upgrade': 'websocket',
         'Origin': 'https://app.getgrass.io',
         'Sec-WebSocket-Version': '13',
-        'Accept-Language': 'en-US,en;q=0.9'
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br'
       },
       timeout: this.connectTimeout,
       followRedirects: true,
       maxPayload: 1024 * 1024,
+      perMessageDeflate: true,
       rejectUnauthorized: false,
       agent: new Agent({
         rejectUnauthorized: false,
@@ -154,7 +159,7 @@ export class GrassClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, 30000);
+      }, 15000);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
