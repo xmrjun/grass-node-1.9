@@ -11,28 +11,55 @@ export class GrassClient {
     this.ws = null;
     this.browserId = uuidv4();
     this.heartbeatInterval = null;
+    this.reconnectDelay = 5000;
+    this.isReconnecting = false;
+    this.authenticated = false;
   }
 
   async start() {
     while (true) {
       try {
-        await this.connect();
-        await this.authenticate();
-        this.startHeartbeat();
-        
-        await new Promise((resolve) => {
-          this.ws.once('close', () => {
-            logger.warn(`Connection closed for proxy: ${this.proxy}`);
-            resolve();
+        if (!this.isReconnecting) {
+          await this.connect();
+          await this.authenticate();
+          this.startHeartbeat();
+          
+          await new Promise((resolve) => {
+            this.ws.on('close', () => {
+              logger.warn(`Connection closed for proxy: ${this.proxy}`);
+              this.authenticated = false;
+              resolve();
+            });
+
+            this.ws.on('error', (error) => {
+              logger.error(`WebSocket error: ${error.message}`);
+              this.authenticated = false;
+              resolve();
+            });
+
+            this.ws.on('message', (data) => {
+              try {
+                const message = JSON.parse(data.toString());
+                if (message.action === 'PING') {
+                  this.handlePing(message.id);
+                }
+              } catch (error) {
+                logger.error(`Failed to parse message: ${error.message}`);
+              }
+            });
           });
-        });
+        }
         
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        this.isReconnecting = true;
+        await new Promise(resolve => setTimeout(resolve, this.reconnectDelay));
+        this.isReconnecting = false;
       } catch (error) {
         logger.error(`Connection error: ${error.message}`);
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        this.isReconnecting = true;
+        await new Promise(resolve => setTimeout(resolve, this.reconnectDelay));
+        this.isReconnecting = false;
       }
     }
   }
@@ -44,16 +71,27 @@ export class GrassClient {
         'Connection': 'Upgrade',
         'Pragma': 'no-cache',
         'Cache-Control': 'no-cache',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.5735.289 Electron/25.8.1 Safari/537.36',
         'Upgrade': 'websocket',
         'Origin': 'https://app.getgrass.io',
         'Sec-WebSocket-Version': '13',
-        'Accept-Language': 'en-US,en;q=0.9'
-      }
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits'
+      },
+      followRedirects: true,
+      maxPayload: 1024 * 1024,
+      perMessageDeflate: true,
+      handshakeTimeout: 30000
     };
 
     if (this.proxy) {
-      options.agent = new HttpsProxyAgent(this.proxy);
+      options.agent = new HttpsProxyAgent({
+        proxy: this.proxy,
+        rejectUnauthorized: false,
+        keepAlive: true,
+        timeout: 30000,
+        keepAliveMsecs: 1000
+      });
     }
 
     return new Promise((resolve, reject) => {
@@ -64,7 +102,7 @@ export class GrassClient {
           this.ws.terminate();
         }
         reject(new Error('Connection timeout'));
-      }, 15000);
+      }, 30000);
 
       this.ws.once('open', () => {
         clearTimeout(timeout);
@@ -83,16 +121,18 @@ export class GrassClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, 15000);
+      }, 30000);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
         try {
           const response = JSON.parse(data.toString());
           await this.sendAuthPayload(response.id);
+          this.authenticated = true;
           logger.info('Authentication successful');
           resolve();
         } catch (error) {
+          this.authenticated = false;
           reject(new Error(`Authentication failed: ${error.message}`));
         }
       });
@@ -106,13 +146,35 @@ export class GrassClient {
       result: {
         browser_id: this.browserId,
         user_id: this.userId,
-        user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.0.0 Safari/537.36',
+        user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.5735.289 Electron/25.8.1 Safari/537.36',
         timestamp: Math.floor(Date.now() / 1000),
-        device_type: 'community',
-        version: '2.0.0'
+        device_type: 'community_node',
+        version: '2.0.0',
+        type: 'community_node',
+        platform: 'win32',
+        arch: 'x64',
+        is_community: true,
+        community_type: 'node'
       }
     };
     await this.sendMessage(payload);
+  }
+
+  async handlePing(id) {
+    try {
+      await this.sendMessage({
+        id: id,
+        origin_action: 'PONG',
+        data: {
+          type: 'community_node',
+          device_type: 'community_node',
+          is_community: true,
+          community_type: 'node'
+        }
+      });
+    } catch (error) {
+      logger.error(`Failed to send PONG: ${error.message}`);
+    }
   }
 
   startHeartbeat() {
@@ -121,23 +183,24 @@ export class GrassClient {
     }
 
     this.heartbeatInterval = setInterval(async () => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
+      if (this.ws?.readyState === WebSocket.OPEN && this.authenticated) {
         try {
           await this.sendMessage({
             id: uuidv4(),
             action: 'PING',
-            data: {}
-          });
-
-          await this.sendMessage({
-            id: 'F3X',
-            origin_action: 'PONG'
+            data: {
+              type: 'community_node',
+              device_type: 'community_node',
+              is_community: true,
+              community_type: 'node'
+            }
           });
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
+          this.cleanup();
         }
       }
-    }, 30000);
+    }, 20000);
   }
 
   async sendMessage(payload) {
@@ -166,5 +229,6 @@ export class GrassClient {
       }
       this.ws = null;
     }
+    this.authenticated = false;
   }
 }
