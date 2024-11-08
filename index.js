@@ -1,44 +1,12 @@
-import { GrassClient } from './src/client.js';
-import { promises as fs } from 'fs';
-import { logger } from './src/logger.js';
-
-async function loadConfig() {
-  try {
-    const userId = (await fs.readFile('uid.txt', 'utf8')).trim();
-    const proxyContent = await fs.readFile('proxy.txt', 'utf8');
-    
-    const proxies = proxyContent
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#'));
-
-    if (!userId) {
-      throw new Error('User ID cannot be empty in uid.txt');
-    }
-
-    return { userId, proxies: proxies.length ? proxies : [null] };
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      throw new Error('Configuration files not found. Please ensure uid.txt and proxy.txt exist.');
-    }
-    throw error;
+export const config = {
+  WEBSOCKET_URL: 'wss://proxy2.wynd.network:4650/',
+  VERSION: '2.0.0',
+  PING_INTERVAL: 20000,
+  MAX_RETRIES: 5,
+  HANDSHAKE_TIMEOUT: 15000,
+  RECONNECT_DELAY: 5000,
+  MAX_RECONNECT_DELAY: 30000,
+  SECURITY: {
+    VALID_PROXY_REGEX: /^(http|https|socks[45]):\/\/([^:]+:[^@]+@)?([a-zA-Z0-9.-]+):\d{1,5}$/
   }
-}
-
-async function main() {
-  try {
-    console.clear();
-    logger.info('🌿 Grass Node Starting...\n');
-
-    const { userId, proxies } = await loadConfig();
-    logger.info(`Starting ${proxies.length} connection(s)...\n`);
-    
-    const clients = proxies.map(proxy => new GrassClient(userId, proxy));
-    await Promise.all(clients.map(client => client.start()));
-  } catch (error) {
-    logger.error(`Error: ${error.message}`);
-    process.exit(1);
-  }
-}
-
-main();
+};
