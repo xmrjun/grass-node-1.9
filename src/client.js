@@ -14,13 +14,13 @@ export class GrassClient {
     this.reconnectTimeout = null;
     this.isAuthenticated = false;
     this.connectionAttempts = 0;
-    this.maxRetries = 20; // 增加重试次数以提高稳定性
-    this.backoffDelay = 2000; // 初始重试延迟
-    this.maxBackoffDelay = 60000; // 最大重试延迟
+    this.maxRetries = 20;
+    this.backoffDelay = 2000;
+    this.maxBackoffDelay = 60000;
     this.isShuttingDown = false;
     this.proxyManager = new ProxyManager();
     this.lastConnectTime = 0;
-    this.connectTimeout = 45000; // 增加连接超时时间
+    this.connectTimeout = 45000;
     this.successfulConnections = 0;
   }
 
@@ -30,14 +30,12 @@ export class GrassClient {
     
     while (!this.isShuttingDown) {
       try {
-        // 检查代理可用性
         if (!this.proxyManager.isProxyViable(this.proxy)) {
           logger.warn(`Proxy ${this.proxy} is currently blocked, waiting for cooldown...`);
           await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
           continue;
         }
 
-        // 连接限制检查
         const now = Date.now();
         const timeSinceLastConnect = now - this.lastConnectTime;
         if (timeSinceLastConnect < 5000) {
@@ -53,7 +51,6 @@ export class GrassClient {
         this.connectionAttempts = 0;
         this.proxyManager.trackProxyStatus(this.proxy, true);
 
-        // 等待连接关闭
         await new Promise((resolve) => {
           this.ws.once('close', () => {
             logger.warn(`Connection closed for proxy: ${this.proxy}`);
@@ -139,7 +136,6 @@ export class GrassClient {
           reject(new Error(`Unexpected server response: ${response.statusCode}`));
         });
 
-        // 处理 ping/pong
         this.ws.on('ping', () => {
           try {
             this.ws.pong();
@@ -184,8 +180,8 @@ export class GrassClient {
         user_id: this.userId,
         user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
         timestamp: Math.floor(Date.now() / 1000),
-        device_type: 'desktop',
-        version: '4.28.1'
+        device_type: 'Grass Community Node',
+        version: '2.0'
       }
     };
     await this.sendMessage(payload);
