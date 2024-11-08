@@ -34,13 +34,11 @@ async function main() {
     logger.info(`Starting ${proxies.length} connection(s)...\n`);
     
     const clients = proxies.map(proxy => new GrassClient(userId, proxy));
-    
-    // 启动所有客户端并保持运行
     await Promise.all(clients.map(client => client.start()));
   } catch (error) {
     logger.error(`Error: ${error.message}`);
-    // 不要退出进程，等待5秒后重试
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // 等待10秒后重试
+    await new Promise(resolve => setTimeout(resolve, 10000));
     main();
   }
 }
