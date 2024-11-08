@@ -11,9 +11,6 @@ export class GrassClient {
     this.ws = null;
     this.browserId = uuidv4();
     this.heartbeatInterval = null;
-    this.reconnectDelay = 10000;
-    this.connectionTimeout = 30000;
-    this.lastHeartbeat = Date.now();
   }
 
   async start() {
@@ -23,6 +20,7 @@ export class GrassClient {
         await this.authenticate();
         this.startHeartbeat();
         
+        // 等待连接关闭
         await new Promise((resolve) => {
           this.ws.once('close', () => {
             logger.warn(`Connection closed for proxy: ${this.proxy}`);
@@ -31,11 +29,11 @@ export class GrassClient {
         });
         
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, this.reconnectDelay));
+        await new Promise(resolve => setTimeout(resolve, 10000));
       } catch (error) {
         logger.error(`Connection error: ${error.message}`);
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, this.reconnectDelay));
+        await new Promise(resolve => setTimeout(resolve, 10000));
       }
     }
   }
@@ -52,30 +50,11 @@ export class GrassClient {
         'Origin': 'https://app.getgrass.io',
         'Sec-WebSocket-Version': '13',
         'Accept-Language': 'en-US,en;q=0.9'
-      },
-      handshakeTimeout: this.connectionTimeout,
-      followRedirects: true,
-      maxPayload: 1024 * 1024
+      }
     };
 
     if (this.proxy) {
-      try {
-        const proxyUrl = new URL(this.proxy);
-        options.agent = new HttpsProxyAgent({
-          protocol: proxyUrl.protocol,
-          host: proxyUrl.hostname,
-          port: proxyUrl.port,
-          auth: proxyUrl.username && proxyUrl.password ? 
-            `${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}` : 
-            undefined,
-          rejectUnauthorized: false,
-          timeout: this.connectionTimeout,
-          keepAlive: true,
-          keepAliveMsecs: 30000
-        });
-      } catch (error) {
-        throw new Error(`Invalid proxy URL: ${error.message}`);
-      }
+      options.agent = new HttpsProxyAgent(this.proxy);
     }
 
     return new Promise((resolve, reject) => {
@@ -86,7 +65,7 @@ export class GrassClient {
           this.ws.terminate();
         }
         reject(new Error('Connection timeout'));
-      }, this.connectionTimeout);
+      }, 30000);
 
       this.ws.once('open', () => {
         clearTimeout(timeout);
@@ -98,20 +77,6 @@ export class GrassClient {
         clearTimeout(timeout);
         reject(error);
       });
-
-      // 添加ping/pong处理
-      this.ws.on('ping', () => {
-        try {
-          this.ws.pong();
-          this.lastHeartbeat = Date.now();
-        } catch (error) {
-          logger.error(`Failed to send pong: ${error.message}`);
-        }
-      });
-
-      this.ws.on('pong', () => {
-        this.lastHeartbeat = Date.now();
-      });
     });
   }
 
@@ -119,7 +84,7 @@ export class GrassClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, this.connectionTimeout);
+      }, 30000);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
@@ -169,11 +134,8 @@ export class GrassClient {
             id: 'F3X',
             origin_action: 'PONG'
           });
-          
-          this.lastHeartbeat = Date.now();
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
-          this.ws?.terminate();
         }
       }
     }, 30000);
