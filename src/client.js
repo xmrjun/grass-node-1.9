@@ -28,11 +28,6 @@ export class GrassClient {
             logger.warn(`Connection closed for proxy: ${this.proxy}`);
             resolve();
           });
-
-          // 添加心跳检查
-          this.ws.on('pong', () => {
-            this.lastHeartbeat = Date.now();
-          });
         });
         
         this.cleanup();
@@ -60,8 +55,7 @@ export class GrassClient {
       },
       handshakeTimeout: this.connectionTimeout,
       followRedirects: true,
-      maxPayload: 1024 * 1024, // 1MB
-      perMessageDeflate: false
+      maxPayload: 1024 * 1024
     };
 
     if (this.proxy) {
@@ -103,6 +97,20 @@ export class GrassClient {
       this.ws.once('error', (error) => {
         clearTimeout(timeout);
         reject(error);
+      });
+
+      // 添加ping/pong处理
+      this.ws.on('ping', () => {
+        try {
+          this.ws.pong();
+          this.lastHeartbeat = Date.now();
+        } catch (error) {
+          logger.error(`Failed to send pong: ${error.message}`);
+        }
+      });
+
+      this.ws.on('pong', () => {
+        this.lastHeartbeat = Date.now();
       });
     });
   }
@@ -151,14 +159,6 @@ export class GrassClient {
     this.heartbeatInterval = setInterval(async () => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         try {
-          // 检查上次心跳时间
-          const now = Date.now();
-          if (now - this.lastHeartbeat > 45000) { // 45秒无心跳则重连
-            logger.warn('Heartbeat timeout, reconnecting...');
-            this.ws?.terminate();
-            return;
-          }
-
           await this.sendMessage({
             id: uuidv4(),
             action: 'PING',
@@ -170,7 +170,7 @@ export class GrassClient {
             origin_action: 'PONG'
           });
           
-          this.lastHeartbeat = now;
+          this.lastHeartbeat = Date.now();
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
           this.ws?.terminate();
@@ -185,12 +185,7 @@ export class GrassClient {
         return reject(new Error('WebSocket not connected'));
       }
 
-      const timeout = setTimeout(() => {
-        reject(new Error('Send message timeout'));
-      }, 10000);
-
       this.ws.send(JSON.stringify(payload), (error) => {
-        clearTimeout(timeout);
         if (error) reject(error);
         else resolve();
       });
