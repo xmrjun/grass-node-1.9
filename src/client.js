@@ -17,11 +17,17 @@ export class GrassClient {
     this.lastHeartbeat = Date.now();
     this.lastPongTime = Date.now();
     this.missedHeartbeats = 0;
-    this.MAX_MISSED_HEARTBEATS = 3;
-    this.HEARTBEAT_INTERVAL = 20000; // 20秒
-    this.HEALTH_CHECK_INTERVAL = 10000; // 10秒
-    this.INITIAL_RECONNECT_DELAY = 10000; // 10秒
-    this.MAX_RECONNECT_DELAY = 60000; // 60秒
+    this.connectionStartTime = 0;
+    this.consecutiveFailures = 0;
+    
+    // Constants
+    this.MAX_MISSED_HEARTBEATS = 2;
+    this.HEARTBEAT_INTERVAL = 25000; // 25秒
+    this.HEALTH_CHECK_INTERVAL = 15000; // 15秒
+    this.MIN_RECONNECT_DELAY = 15000; // 15秒
+    this.MAX_RECONNECT_DELAY = 120000; // 2分钟
+    this.CONNECTION_TIMEOUT = 30000; // 30秒
+    this.MIN_CONNECTION_TIME = 30000; // 连接至少保持30秒才重置失败计数
   }
 
   async start() {
@@ -32,36 +38,51 @@ export class GrassClient {
         this.startHeartbeat();
         this.startHealthCheck();
         this.isConnected = true;
-        this.retryCount = 0;
+        this.connectionStartTime = Date.now();
         
+        // 等待连接关闭
         await new Promise((resolve) => {
-          this.ws.once('close', resolve);
+          this.ws.once('close', () => {
+            const connectionDuration = Date.now() - this.connectionStartTime;
+            if (connectionDuration > this.MIN_CONNECTION_TIME) {
+              this.consecutiveFailures = 0; // 重置失败计数
+              this.retryCount = 0;
+            } else {
+              this.consecutiveFailures++;
+            }
+            resolve();
+          });
         });
         
         logger.warn(`Connection closed for proxy: ${this.proxy}`);
         this.cleanup();
         
-        const delay = Math.min(
-          this.INITIAL_RECONNECT_DELAY * Math.pow(2, this.retryCount),
-          this.MAX_RECONNECT_DELAY
-        );
-        
-        logger.info(`Reconnecting in ${delay/1000} seconds...`);
+        // 计算重连延迟
+        const delay = this.calculateReconnectDelay();
+        logger.info(`Reconnecting in ${Math.floor(delay/1000)} seconds...`);
         await new Promise(resolve => setTimeout(resolve, delay));
-        this.retryCount++;
+        
       } catch (error) {
         logger.error(`Connection error: ${error.message}`);
         this.cleanup();
+        this.consecutiveFailures++;
         
-        const delay = Math.min(
-          this.INITIAL_RECONNECT_DELAY * Math.pow(2, this.retryCount),
-          this.MAX_RECONNECT_DELAY
-        );
-        
+        const delay = this.calculateReconnectDelay();
         await new Promise(resolve => setTimeout(resolve, delay));
-        this.retryCount++;
       }
     }
+  }
+
+  calculateReconnectDelay() {
+    // 基于连续失败次数计算延迟
+    const baseDelay = Math.min(
+      this.MIN_RECONNECT_DELAY * Math.pow(1.5, this.consecutiveFailures),
+      this.MAX_RECONNECT_DELAY
+    );
+    
+    // 添加随机抖动，避免多个客户端同时重连
+    const jitter = Math.random() * 5000;
+    return baseDelay + jitter;
   }
 
   async connect() {
@@ -77,7 +98,7 @@ export class GrassClient {
         'Sec-WebSocket-Version': '13',
         'Accept-Language': 'en-US,en;q=0.9'
       },
-      handshakeTimeout: 30000,
+      handshakeTimeout: this.CONNECTION_TIMEOUT,
       followRedirects: true,
       maxPayload: 1024 * 1024,
       perMessageDeflate: false
@@ -94,9 +115,9 @@ export class GrassClient {
             `${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}` : 
             undefined,
           rejectUnauthorized: false,
-          timeout: 30000,
+          timeout: this.CONNECTION_TIMEOUT,
           keepAlive: true,
-          keepAliveMsecs: 10000,
+          keepAliveMsecs: 15000,
           maxSockets: 1,
           scheduling: 'lifo'
         });
@@ -114,7 +135,7 @@ export class GrassClient {
             this.ws.terminate();
           }
           reject(new Error('Connection timeout'));
-        }, 30000);
+        }, this.CONNECTION_TIMEOUT);
 
         this.ws.once('open', () => {
           clearTimeout(connectTimeout);
@@ -160,6 +181,7 @@ export class GrassClient {
           }).catch(() => {});
         }
         this.lastHeartbeat = Date.now();
+        this.missedHeartbeats = 0;
       } catch (error) {}
     });
   }
@@ -168,7 +190,7 @@ export class GrassClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, 30000);
+      }, this.CONNECTION_TIMEOUT);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
@@ -240,7 +262,10 @@ export class GrassClient {
 
     this.healthCheckInterval = setInterval(() => {
       const now = Date.now();
-      if (now - this.lastHeartbeat > 60000 || now - this.lastPongTime > 60000) {
+      const heartbeatAge = now - this.lastHeartbeat;
+      const pongAge = now - this.lastPongTime;
+      
+      if (heartbeatAge > 45000 || pongAge > 45000) {
         logger.warn('Connection seems dead, forcing reconnect...');
         this.ws?.terminate();
       }
