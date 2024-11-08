@@ -9,11 +9,8 @@ export class GrassClient {
     this.userId = userId;
     this.proxy = proxy;
     this.ws = null;
-    this.retryCount = 0;
     this.browserId = uuidv4();
-    this.isConnected = false;
     this.heartbeatInterval = null;
-    this.reconnectTimeout = null;
   }
 
   async start() {
@@ -22,9 +19,7 @@ export class GrassClient {
         await this.connect();
         await this.authenticate();
         this.startHeartbeat();
-        this.isConnected = true;
         
-        // 等待连接关闭
         await new Promise((resolve) => {
           this.ws.once('close', () => {
             logger.warn(`Connection closed for proxy: ${this.proxy}`);
@@ -34,7 +29,6 @@ export class GrassClient {
         
         this.cleanup();
         await new Promise(resolve => setTimeout(resolve, 10000));
-        
       } catch (error) {
         logger.error(`Connection error: ${error.message}`);
         this.cleanup();
@@ -183,11 +177,6 @@ export class GrassClient {
       this.heartbeatInterval = null;
     }
     
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
-    }
-    
     if (this.ws) {
       this.ws.removeAllListeners();
       if (this.ws.readyState === WebSocket.OPEN) {
@@ -195,7 +184,5 @@ export class GrassClient {
       }
       this.ws = null;
     }
-    
-    this.isConnected = false;
   }
 }
