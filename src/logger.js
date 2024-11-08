@@ -1,14 +1,11 @@
 import chalk from 'chalk';
 
-const getTime = () => new Date().toLocaleTimeString('en-US', { 
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit'
-});
+function getTimestamp() {
+  return new Date().toISOString().replace('T', ' ').substring(0, 19);
+}
 
 export const logger = {
-  info: msg => console.log(`[${getTime()}] ${chalk.blue('ℹ️')} ${msg}`),
-  error: msg => console.error(`[${getTime()}] ${chalk.red('❌')} ${msg}`),
-  warn: msg => console.warn(`[${getTime()}] ${chalk.yellow('⚠️')} ${msg}`)
+  info: (message) => console.log(`${chalk.gray(getTimestamp())} - ${message}`),
+  error: (message) => console.error(`${chalk.gray(getTimestamp())} - ${chalk.red(message)}`),
+  warn: (message) => console.warn(`${chalk.gray(getTimestamp())} - ${chalk.yellow(message)}`)
 };
