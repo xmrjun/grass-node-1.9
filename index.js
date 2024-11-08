@@ -25,33 +25,73 @@ async function loadConfig() {
   }
 }
 
-async function main() {
+async function startClient() {
   try {
     console.clear();
-    logger.info('?? Grass Node Starting...\n');
+    logger.info('ðŸŒ¿ Grass Node Starting...\n');
 
     const { userId, proxies } = await loadConfig();
     logger.info(`Starting ${proxies.length} connection(s)...\n`);
     
     const clients = proxies.map(proxy => new GrassClient(userId, proxy));
     
-    // Æô¶¯ËùÓÐ¿Í»§¶Ë²¢±£³ÖÔËÐÐ
+    // ç›‘æŽ§æ‰€æœ‰å®¢æˆ·ç«¯è¿žæŽ¥
+    const monitor = setInterval(() => {
+      let activeConnections = clients.filter(client => client.isConnected).length;
+      logger.info(`Active connections: ${activeConnections}/${clients.length}`);
+      
+      // å¦‚æžœæœ‰æ–­å¼€çš„è¿žæŽ¥ï¼Œå°è¯•é‡æ–°è¿žæŽ¥
+      clients.forEach(client => {
+        if (!client.isConnected) {
+          client.start().catch(() => {});
+        }
+      });
+    }, 30000); // æ¯30ç§’æ£€æŸ¥ä¸€æ¬¡
+
+    // å¯åŠ¨æ‰€æœ‰å®¢æˆ·ç«¯
     await Promise.all(clients.map(client => client.start()));
+
+    return monitor;
   } catch (error) {
     logger.error(`Error: ${error.message}`);
-    // ²»ÒªÍË³ö½ø³Ì£¬µÈ´ý5ÃëºóÖØÊÔ
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    main();
+    throw error;
   }
 }
 
-// ²¶»ñÎ´´¦ÀíµÄÒì³££¬·ÀÖ¹³ÌÐò±ÀÀ£
-process.on('uncaughtException', (error) => {
-  logger.error(`Uncaught Exception: ${error.message}`);
-});
+async function main() {
+  let monitor;
+  
+  const restart = async () => {
+    if (monitor) clearInterval(monitor);
+    try {
+      monitor = await startClient();
+    } catch (error) {
+      logger.error(`Failed to start clients: ${error.message}`);
+      logger.info('Retrying in 30 seconds...');
+      setTimeout(restart, 30000);
+    }
+  };
 
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
-});
+  // å¯åŠ¨ä¸»ç¨‹åº
+  await restart();
+
+  // å¤„ç†æœªæ•èŽ·çš„å¼‚å¸¸
+  process.on('uncaughtException', (error) => {
+    logger.error(`Uncaught Exception: ${error.message}`);
+    restart();
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+    restart();
+  });
+
+  // ä¼˜é›…é€€å‡º
+  process.on('SIGINT', async () => {
+    logger.info('Shutting down gracefully...');
+    if (monitor) clearInterval(monitor);
+    process.exit(0);
+  });
+}
 
 main();
