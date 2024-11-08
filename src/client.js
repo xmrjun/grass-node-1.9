@@ -1,9 +1,9 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import pkg from 'https-proxy-agent';
-import { config } from './config.js';
 const { HttpsProxyAgent } = pkg;
 import { logger } from './logger.js';
+import { config } from './config.js';
 
 export class GrassClient {
   constructor(userId, proxy = null) {
@@ -13,10 +13,12 @@ export class GrassClient {
     this.browserId = uuidv4();
     this.deviceId = `Desktop-${Math.random().toString(36).substr(2, 9)}`;
     this.heartbeatInterval = null;
+    this.retryCount = 0;
+    this.maxRetries = 5;
   }
 
   async start() {
-    while (true) {
+    while (this.retryCount < this.maxRetries) {
       try {
         await this.connect();
         await this.authenticate();
@@ -30,11 +32,14 @@ export class GrassClient {
         });
         
         this.cleanup();
+        this.retryCount = 0;
         await new Promise(resolve => setTimeout(resolve, 5000));
       } catch (error) {
-        logger.error(`Connection error for device ${this.deviceId}: ${error.message}`);
+        this.retryCount++;
+        logger.error(`Connection error for device ${this.deviceId} (attempt ${this.retryCount}/${this.maxRetries}): ${error.message}`);
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        const delay = Math.min(1000 * Math.pow(2, this.retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
