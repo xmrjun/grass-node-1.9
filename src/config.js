@@ -1,34 +1,11 @@
-import { promises as fs } from 'fs';
-import path from 'path';
-import { logger } from './logger.js';
-
-export async function loadConfig() {
-  try {
-    const userId = await fs.readFile('uid.txt', 'utf8');
-    const proxyContent = await fs.readFile('proxy.txt', 'utf8');
-    
-    const proxies = proxyContent
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#'));
-
-    if (!userId.trim()) {
-      throw new Error('User ID cannot be empty');
-    }
-
-    logger.info(`Loaded user ID: ${userId.trim()}`);
-    logger.info(`Found ${proxies.length} proxies`);
-
-    return {
-      userId: userId.trim(),
-      proxies: proxies.length ? proxies : [null]
-    };
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      logger.error('Required configuration files not found');
-      logger.error('Please ensure both uid.txt and proxy.txt exist');
-      process.exit(1);
-    }
-    throw error;
+export const config = {
+  WEBSOCKET_URL: 'wss://proxy2.wynd.network:4650/',
+  VERSION: '2.0.0',
+  PING_INTERVAL: 20000,
+  MAX_RETRIES: 0,
+  HANDSHAKE_TIMEOUT: 30000,
+  RECONNECT_DELAY: 5000,
+  SECURITY: {
+    VALID_PROXY_REGEX: /^(http|https|socks[45]):\/\/([^:]+:[^@]+@)?([a-zA-Z0-9.-]+):\d{1,5}$/
   }
-}
+};
