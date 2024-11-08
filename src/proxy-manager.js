@@ -1,10 +1,10 @@
 export class ProxyManager {
   constructor() {
     this.proxyStatus = new Map();
-    this.failureThreshold = 5;
-    this.successThreshold = 3;
-    this.retryTimeout = 300000; // 5 minutes cooldown
-    this.maxFailures = 10;
+    this.failureThreshold = 3;
+    this.successThreshold = 2;
+    this.retryTimeout = 60000; // 1 minute cooldown
+    this.maxFailures = 5;
   }
 
   trackProxyStatus(proxy, success) {
@@ -25,11 +25,10 @@ export class ProxyManager {
     
     if (success) {
       status.successes++;
-      status.failures = 0;
+      status.failures = Math.max(0, status.failures - 1);
       status.lastSuccess = now;
-      // 成功后重置总失败次数
       if (status.successes >= this.successThreshold) {
-        status.totalFailures = 0;
+        status.totalFailures = Math.max(0, status.totalFailures - 1);
       }
     } else {
       status.failures++;
@@ -51,16 +50,18 @@ export class ProxyManager {
       if (timeSinceLastFailure < this.retryTimeout) {
         return false;
       }
+      // 重置失败计数
+      status.failures = Math.max(0, status.failures - 1);
     }
 
-    // 检查长期失败
+    // 检查总失败次数
     if (status.totalFailures >= this.maxFailures) {
       const timeSinceLastFailure = Date.now() - status.lastFailure;
       if (timeSinceLastFailure < this.retryTimeout * 2) {
         return false;
       }
-      // 重置长期失败计数
-      status.totalFailures = 0;
+      // 逐步减少总失败计数
+      status.totalFailures = Math.max(0, status.totalFailures - 1);
     }
 
     return true;
