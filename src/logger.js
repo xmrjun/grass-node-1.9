@@ -6,6 +6,7 @@ function getTimestamp() {
 
 export const logger = {
   info: (message) => console.log(`${chalk.gray(getTimestamp())} - ${message}`),
+  success: (message) => console.log(`${chalk.gray(getTimestamp())} - ${chalk.green(message)}`),
   error: (message) => console.error(`${chalk.gray(getTimestamp())} - ${chalk.red(message)}`),
   warn: (message) => console.warn(`${chalk.gray(getTimestamp())} - ${chalk.yellow(message)}`)
 };
