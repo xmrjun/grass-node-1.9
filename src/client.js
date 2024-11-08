@@ -1,7 +1,6 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import pkg from 'https-proxy-agent';
-import { SocksProxyAgent } from 'socks-proxy-agent';
 const { HttpsProxyAgent } = pkg;
 import { logger } from './logger.js';
 
@@ -56,32 +55,7 @@ export class GrassClient {
     };
 
     if (this.proxy) {
-      try {
-        const proxyUrl = new URL(this.proxy);
-        if (proxyUrl.protocol === 'socks5:') {
-          options.agent = new SocksProxyAgent({
-            hostname: proxyUrl.hostname,
-            port: proxyUrl.port,
-            userId: proxyUrl.username,
-            password: proxyUrl.password,
-            timeout: 30000
-          });
-        } else {
-          options.agent = new HttpsProxyAgent({
-            protocol: proxyUrl.protocol,
-            host: proxyUrl.hostname,
-            port: proxyUrl.port,
-            auth: proxyUrl.username && proxyUrl.password ? 
-              `${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}` : 
-              undefined,
-            rejectUnauthorized: false,
-            timeout: 30000,
-            keepAlive: true
-          });
-        }
-      } catch (error) {
-        throw new Error(`Invalid proxy URL: ${error.message}`);
-      }
+      options.agent = new HttpsProxyAgent(this.proxy);
     }
 
     return new Promise((resolve, reject) => {
