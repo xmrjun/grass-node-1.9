@@ -11,29 +11,76 @@ export class GrassClient {
     this.ws = null;
     this.browserId = uuidv4();
     this.heartbeatInterval = null;
+    this.healthCheckInterval = null;
+    this.lastPingTime = null;
+    this.lastPongTime = null;
+    this.connectionAttempts = 0;
+    this.pointsMultiplier = 1.0;
+    this.isReconnecting = false;
   }
 
   async start() {
     while (true) {
       try {
-        await this.connect();
-        await this.authenticate();
-        this.startHeartbeat();
-        
-        await new Promise((resolve) => {
-          this.ws.once('close', () => {
-            logger.warn(`Connection closed for proxy: ${this.proxy}`);
-            resolve();
+        if (!this.isReconnecting) {
+          await this.connect();
+          await this.authenticate();
+          this.startHeartbeat();
+          this.startHealthCheck();
+          
+          await new Promise((resolve) => {
+            this.ws.once('close', () => {
+              logger.warn(`Connection closed for proxy: ${this.proxy}`);
+              resolve();
+            });
           });
-        });
+        }
         
         this.cleanup();
+        this.isReconnecting = true;
+        logger.info('Initiating automatic reconnection...');
         await new Promise(resolve => setTimeout(resolve, 10000));
       } catch (error) {
         logger.error(`Connection error: ${error.message}`);
         this.cleanup();
         await new Promise(resolve => setTimeout(resolve, 10000));
       }
+    }
+  }
+
+  startHealthCheck() {
+    this.healthCheckInterval = setInterval(() => {
+      this.checkConnectionHealth();
+    }, 15000);
+  }
+
+  async checkConnectionHealth() {
+    try {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        throw new Error('Connection lost');
+      }
+
+      const currentTime = Date.now();
+      if (this.lastPingTime && currentTime - this.lastPingTime > 60000) {
+        throw new Error('No ping received in 60 seconds');
+      }
+
+      if (this.pointsMultiplier < 1.0) {
+        logger.warn('Points multiplier abnormal, initiating reconnection');
+        this.forceReconnect();
+      }
+
+    } catch (error) {
+      logger.error(`Health check failed: ${error.message}`);
+      this.forceReconnect();
+    }
+  }
+
+  forceReconnect() {
+    if (!this.isReconnecting) {
+      this.isReconnecting = true;
+      this.cleanup();
+      logger.info('Forcing reconnection due to health check failure');
     }
   }
 
@@ -68,6 +115,8 @@ export class GrassClient {
 
       this.ws.once('open', () => {
         clearTimeout(timeout);
+        this.isReconnecting = false;
+        this.connectionAttempts = 0;
         logger.info(`Connected via proxy: ${this.proxy}`);
         resolve();
       });
@@ -75,6 +124,18 @@ export class GrassClient {
       this.ws.once('error', (error) => {
         clearTimeout(timeout);
         reject(error);
+      });
+
+      this.ws.on('message', (data) => {
+        try {
+          const message = JSON.parse(data.toString());
+          if (message.action === 'UPDATE_MULTIPLIER') {
+            this.pointsMultiplier = message.data.multiplier;
+            logger.info(`Points Multiplier Updated: ${this.pointsMultiplier}x`);
+          }
+        } catch (error) {
+          logger.error(`Failed to process message: ${error.message}`);
+        }
       });
     });
   }
@@ -123,6 +184,7 @@ export class GrassClient {
     this.heartbeatInterval = setInterval(async () => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         try {
+          this.lastPingTime = Date.now();
           await this.sendMessage({
             id: uuidv4(),
             action: 'PING',
@@ -133,8 +195,10 @@ export class GrassClient {
             id: 'F3X',
             origin_action: 'PONG'
           });
+          this.lastPongTime = Date.now();
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
+          this.forceReconnect();
         }
       }
     }, 30000);
@@ -157,6 +221,11 @@ export class GrassClient {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
+    }
+
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
     }
     
     if (this.ws) {
