@@ -50,4 +50,3 @@ export class ProxyManager {
     return true;
   }
 }
-#1
