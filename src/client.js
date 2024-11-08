@@ -87,7 +87,7 @@ export class GrassClient {
         'Connection': 'Upgrade',
         'Pragma': 'no-cache',
         'Cache-Control': 'no-cache',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.0.0 Safari/537.36',
         'Upgrade': 'websocket',
         'Origin': 'https://app.getgrass.io',
         'Sec-WebSocket-Version': '13',
@@ -178,10 +178,10 @@ export class GrassClient {
       result: {
         browser_id: this.browserId,
         user_id: this.userId,
-        user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+        user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/2.0.0 Chrome/114.0.0.0 Safari/537.36',
         timestamp: Math.floor(Date.now() / 1000),
-        device_type: 'Grass Community Node',
-        version: '2.0'
+        device_type: 'Grass Node',
+        version: '2.0.0'
       }
     };
     await this.sendMessage(payload);
