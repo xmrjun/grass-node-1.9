@@ -16,45 +16,54 @@ export class GrassClient {
     this.security = new SecurityManager();
     this.proxyManager = new ProxyManager();
     this.isAuthenticated = false;
+    this.pointsMultiplier = 1.0;
+    this.heartbeatInterval = null;
   }
 
   async start() {
     while (this.retryCount < config.MAX_RETRIES) {
       try {
-        this.ws = new WebSocket(config.WEBSOCKET_URL, {
-          headers: this.getHeaders(),
-          proxy: this.proxy,
-          handshakeTimeout: config.HANDSHAKE_TIMEOUT
-        });
-
-        this.ws.on('error', (error) => {
-          logger.error(`WebSocket error: ${error.message}`);
-        });
-
-        await new Promise((resolve, reject) => {
-          this.ws.once('open', resolve);
-          this.ws.once('error', reject);
-        });
-
-        if (await this.authenticate()) {
-          this.retryCount = 0;
-          await this.handleHeartbeat();
-        }
+        await this.connect();
+        await this.startSession();
       } catch (error) {
         this.retryCount++;
         logger.error(
           `Connection error (attempt ${this.retryCount}/${config.MAX_RETRIES}): ${error.message}`
         );
-        await new Promise(resolve => setTimeout(resolve, config.RECONNECT_DELAYS[
-          Math.min(this.retryCount - 1, config.RECONNECT_DELAYS.length - 1)
-        ]));
-      } finally {
-        if (this.ws) {
-          this.ws.close();
-          this.isAuthenticated = false;
-        }
+        await this.handleReconnect();
       }
     }
+  }
+
+  async connect() {
+    this.ws = new WebSocket(config.WEBSOCKET_URL, {
+      headers: this.getHeaders(),
+      proxy: this.proxy,
+      handshakeTimeout: config.HANDSHAKE_TIMEOUT,
+      perMessageDeflate: true
+    });
+
+    this.setupEventListeners();
+
+    return new Promise((resolve, reject) => {
+      this.ws.once('open', () => {
+        logger.info(chalk.green('WebSocket connection established'));
+        resolve();
+      });
+      this.ws.once('error', reject);
+    });
+  }
+
+  setupEventListeners() {
+    this.ws.on('message', (data) => this.handleMessage(data));
+    this.ws.on('close', () => {
+      logger.warn('Connection closed');
+      this.cleanup();
+    });
+    this.ws.on('error', (error) => {
+      logger.error(`WebSocket error: ${error.message}`);
+      this.proxyManager.trackProxyStatus(this.proxy, false);
+    });
   }
 
   getHeaders() {
@@ -63,12 +72,21 @@ export class GrassClient {
       'Connection': 'Upgrade',
       'Pragma': 'no-cache',
       'Cache-Control': 'no-cache',
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/1.0.0 Chrome/114.0.5735.289 Electron/25.8.1 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/1.0.0 Chrome/114.0.5735.289 Electron/25.8.1 Safari/537.36',
       'Upgrade': 'websocket',
       'Origin': 'https://app.getgrass.io',
       'Sec-WebSocket-Version': '13',
-      'Accept-Language': 'en-US,en;q=0.9'
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits'
     };
+  }
+
+  async startSession() {
+    if (await this.authenticate()) {
+      this.retryCount = 0;
+      await this.startHeartbeat();
+      await new Promise((resolve) => this.ws.once('close', resolve));
+    }
   }
 
   async authenticate() {
@@ -94,7 +112,7 @@ export class GrassClient {
             result: {
               browser_id: this.browserId,
               user_id: this.userId,
-              user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+              user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Grass/1.0.0 Chrome/114.0.5735.289 Electron/25.8.1 Safari/537.36',
               timestamp: Math.floor(Date.now() / 1000),
               device_type: 'desktop',
               version: config.VERSION
@@ -103,6 +121,7 @@ export class GrassClient {
 
           await this.sendMessage(authPayload);
           this.isAuthenticated = true;
+          this.proxyManager.trackProxyStatus(this.proxy, true);
           logger.info(chalk.green('Authentication successful'));
           resolve(true);
         } catch (error) {
@@ -113,8 +132,37 @@ export class GrassClient {
     });
   }
 
-  async handleHeartbeat() {
-    while (this.ws?.readyState === WebSocket.OPEN) {
+  handleMessage(data) {
+    try {
+      const message = JSON.parse(data.toString());
+      
+      if (message.action === 'UPDATE_MULTIPLIER') {
+        this.pointsMultiplier = message.data.multiplier;
+        logger.info(chalk.yellow(`Points Multiplier Updated: ${this.pointsMultiplier}x`));
+      }
+      
+      if (message.action === 'PING') {
+        this.handlePing(message.id);
+      }
+    } catch (error) {
+      logger.error(`Failed to handle message: ${error.message}`);
+    }
+  }
+
+  async handlePing(id) {
+    try {
+      await this.sendMessage({
+        id: id,
+        origin_action: 'PONG'
+      });
+      logger.info(chalk.blue('Responded to ping'));
+    } catch (error) {
+      logger.error(`Failed to respond to ping: ${error.message}`);
+    }
+  }
+
+  async startHeartbeat() {
+    this.heartbeatInterval = setInterval(async () => {
       try {
         const pingPayload = {
           id: uuidv4(),
@@ -122,21 +170,25 @@ export class GrassClient {
           data: {}
         };
         await this.sendMessage(pingPayload);
-        logger.info(`Sent ${chalk.green('ping')} to server`);
+        logger.info(chalk.green('Heartbeat sent'));
 
         const pongPayload = {
           id: 'F3X',
           origin_action: 'PONG'
         };
         await this.sendMessage(pongPayload);
-        logger.info(`Sent ${chalk.magenta('pong')} to server`);
-
-        await new Promise(resolve => setTimeout(resolve, config.PING_INTERVAL));
       } catch (error) {
         logger.error(`Heartbeat error: ${error.message}`);
-        break;
+        this.cleanup();
       }
-    }
+    }, config.PING_INTERVAL);
+  }
+
+  async handleReconnect() {
+    const delay = config.RECONNECT_DELAYS[
+      Math.min(this.retryCount - 1, config.RECONNECT_DELAYS.length - 1)
+    ];
+    await new Promise(resolve => setTimeout(resolve, delay));
   }
 
   async sendMessage(payload) {
@@ -144,10 +196,28 @@ export class GrassClient {
       throw new Error('Cannot send message before authentication');
     }
     return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return reject(new Error('WebSocket not connected'));
+      }
       this.ws.send(JSON.stringify(payload), (error) => {
         if (error) reject(error);
         else resolve();
       });
     });
+  }
+
+  cleanup() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close();
+      }
+      this.ws = null;
+    }
+    this.isAuthenticated = false;
   }
 }
