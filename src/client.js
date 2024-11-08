@@ -10,16 +10,18 @@ export class GrassClient {
     this.proxy = proxy;
     this.ws = null;
     this.retryCount = 0;
-    this.maxRetries = Infinity; // ÎÞÏÞÖØÊÔ
     this.browserId = uuidv4();
     this.isConnected = false;
     this.heartbeatInterval = null;
-    this.reconnectTimeout = null;
-    this.connectionTimeout = 30000;
-    this.baseReconnectDelay = 5000;
-    this.maxReconnectDelay = 30000;
+    this.healthCheckInterval = null;
     this.lastHeartbeat = Date.now();
-    this.heartbeatTimeout = 45000;
+    this.lastPongTime = Date.now();
+    this.missedHeartbeats = 0;
+    this.MAX_MISSED_HEARTBEATS = 3;
+    this.HEARTBEAT_INTERVAL = 10000; // 10ç§’
+    this.HEALTH_CHECK_INTERVAL = 5000; // 5ç§’
+    this.INITIAL_RECONNECT_DELAY = 2000; // 2ç§’
+    this.MAX_RECONNECT_DELAY = 10000; // 10ç§’
   }
 
   async start() {
@@ -30,37 +32,33 @@ export class GrassClient {
         this.startHeartbeat();
         this.startHealthCheck();
         this.isConnected = true;
+        this.retryCount = 0;
         
-        // µÈ´ýÁ¬½Ó¹Ø±Õ
         await new Promise((resolve) => {
           this.ws.once('close', resolve);
         });
         
-        // Á¬½Ó¹Ø±Õºó×Ô¶¯ÖØÁ¬
         logger.warn(`Connection closed for proxy: ${this.proxy}`);
         this.cleanup();
         
         const delay = Math.min(
-          this.baseReconnectDelay * Math.pow(1.5, this.retryCount),
-          this.maxReconnectDelay
+          this.INITIAL_RECONNECT_DELAY * Math.pow(1.5, this.retryCount),
+          this.MAX_RECONNECT_DELAY
         );
         
         logger.info(`Reconnecting in ${delay/1000} seconds...`);
         await new Promise(resolve => setTimeout(resolve, delay));
-        
         this.retryCount++;
       } catch (error) {
-        logger.error(`Connection error for proxy ${this.proxy}: ${error.message}`);
+        logger.error(`Connection error: ${error.message}`);
         this.cleanup();
         
         const delay = Math.min(
-          this.baseReconnectDelay * Math.pow(1.5, this.retryCount),
-          this.maxReconnectDelay
+          this.INITIAL_RECONNECT_DELAY * Math.pow(1.5, this.retryCount),
+          this.MAX_RECONNECT_DELAY
         );
         
-        logger.info(`Retrying in ${delay/1000} seconds...`);
         await new Promise(resolve => setTimeout(resolve, delay));
-        
         this.retryCount++;
       }
     }
@@ -79,9 +77,10 @@ export class GrassClient {
         'Sec-WebSocket-Version': '13',
         'Accept-Language': 'en-US,en;q=0.9'
       },
-      handshakeTimeout: this.connectionTimeout,
+      handshakeTimeout: 15000,
       followRedirects: true,
-      maxPayload: 1024 * 1024
+      maxPayload: 1024 * 1024,
+      perMessageDeflate: false
     };
 
     if (this.proxy) {
@@ -95,9 +94,9 @@ export class GrassClient {
             `${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}` : 
             undefined,
           rejectUnauthorized: false,
-          timeout: this.connectionTimeout,
+          timeout: 10000,
           keepAlive: true,
-          keepAliveMsecs: 30000
+          keepAliveMsecs: 5000
         });
       } catch (error) {
         throw new Error(`Invalid proxy URL: ${error.message}`);
@@ -105,38 +104,61 @@ export class GrassClient {
     }
 
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket('wss://proxy2.wynd.network:4650', options);
+      try {
+        this.ws = new WebSocket('wss://proxy2.wynd.network:4650', options);
+        
+        const connectTimeout = setTimeout(() => {
+          if (this.ws) {
+            this.ws.terminate();
+          }
+          reject(new Error('Connection timeout'));
+        }, 15000);
 
-      const timeout = setTimeout(() => {
-        if (this.ws) {
-          this.ws.terminate();
-        }
-        reject(new Error('Connection timeout'));
-      }, this.connectionTimeout);
+        this.ws.once('open', () => {
+          clearTimeout(connectTimeout);
+          logger.info(`Connected via proxy: ${this.proxy}`);
+          resolve();
+        });
 
-      this.ws.once('open', () => {
-        clearTimeout(timeout);
-        logger.info(`Connected via proxy: ${this.proxy}`);
-        resolve();
-      });
+        this.ws.once('error', (error) => {
+          clearTimeout(connectTimeout);
+          reject(error);
+        });
 
-      this.ws.once('error', (error) => {
-        clearTimeout(timeout);
+        this.setupWebSocketHandlers();
+      } catch (error) {
         reject(error);
-      });
+      }
+    });
+  }
 
-      this.ws.on('ping', () => {
-        try {
-          this.ws.pong();
-          this.lastHeartbeat = Date.now();
-        } catch (error) {
-          logger.error(`Failed to send pong: ${error.message}`);
+  setupWebSocketHandlers() {
+    this.ws.on('ping', () => {
+      try {
+        this.ws.pong();
+        this.lastPongTime = Date.now();
+        this.missedHeartbeats = 0;
+      } catch (error) {
+        logger.error(`Failed to send pong: ${error.message}`);
+      }
+    });
+
+    this.ws.on('pong', () => {
+      this.lastPongTime = Date.now();
+      this.missedHeartbeats = 0;
+    });
+
+    this.ws.on('message', (data) => {
+      try {
+        const message = JSON.parse(data.toString());
+        if (message.action === 'PING') {
+          this.sendMessage({
+            id: message.id,
+            origin_action: 'PONG'
+          }).catch(() => {});
         }
-      });
-
-      this.ws.on('pong', () => {
         this.lastHeartbeat = Date.now();
-      });
+      } catch (error) {}
     });
   }
 
@@ -144,7 +166,7 @@ export class GrassClient {
     return new Promise((resolve, reject) => {
       const authTimeout = setTimeout(() => {
         reject(new Error('Authentication timeout'));
-      }, this.connectionTimeout);
+      }, 10000);
 
       this.ws.once('message', async (data) => {
         clearTimeout(authTimeout);
@@ -195,12 +217,18 @@ export class GrassClient {
             origin_action: 'PONG'
           });
           
-          this.lastHeartbeat = Date.now();
+          this.missedHeartbeats++;
+          if (this.missedHeartbeats >= this.MAX_MISSED_HEARTBEATS) {
+            logger.warn('Too many missed heartbeats, reconnecting...');
+            this.ws?.terminate();
+            return;
+          }
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
+          this.ws?.terminate();
         }
       }
-    }, 30000);
+    }, this.HEARTBEAT_INTERVAL);
   }
 
   startHealthCheck() {
@@ -210,11 +238,11 @@ export class GrassClient {
 
     this.healthCheckInterval = setInterval(() => {
       const now = Date.now();
-      if (now - this.lastHeartbeat > this.heartbeatTimeout) {
+      if (now - this.lastHeartbeat > 30000 || now - this.lastPongTime > 30000) {
         logger.warn('Connection seems dead, forcing reconnect...');
         this.ws?.terminate();
       }
-    }, 15000);
+    }, this.HEALTH_CHECK_INTERVAL);
   }
 
   async sendMessage(payload) {
@@ -225,7 +253,7 @@ export class GrassClient {
 
       const timeout = setTimeout(() => {
         reject(new Error('Send message timeout'));
-      }, 10000);
+      }, 5000);
 
       this.ws.send(JSON.stringify(payload), (error) => {
         clearTimeout(timeout);
@@ -244,11 +272,6 @@ export class GrassClient {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
-    }
-    
-    if (this.reconnectTimeout) {
-      clearTimeout(this.reconnectTimeout);
-      this.reconnectTimeout = null;
     }
     
     if (this.ws) {
