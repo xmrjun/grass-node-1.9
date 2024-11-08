@@ -8,7 +8,7 @@ const getTime = () => new Date().toLocaleTimeString('en-US', {
 });
 
 export const logger = {
-  info: msg => console.log(`[${getTime()}] ${chalk.blue('??')} ${msg}`),
-  error: msg => console.error(`[${getTime()}] ${chalk.red('?')} ${msg}`),
-  warn: msg => console.warn(`[${getTime()}] ${chalk.yellow('??')} ${msg}`)
+  info: msg => console.log(`[${getTime()}] ${chalk.blue('ℹ️')} ${msg}`),
+  error: msg => console.error(`[${getTime()}] ${chalk.red('❌')} ${msg}`),
+  warn: msg => console.warn(`[${getTime()}] ${chalk.yellow('⚠️')} ${msg}`)
 };
