@@ -3,8 +3,7 @@ export class ProxyManager {
     this.proxyStatus = new Map();
     this.failureThreshold = 3;
     this.successThreshold = 2;
-    this.retryTimeout = 60000; // 1 minute cooldown
-    this.maxFailures = 5;
+    this.retryTimeout = 30000;
   }
 
   trackProxyStatus(proxy, success) {
@@ -14,27 +13,19 @@ export class ProxyManager {
       this.proxyStatus.set(proxy, {
         failures: 0,
         successes: 0,
-        lastFailure: 0,
-        lastSuccess: 0,
-        totalFailures: 0
+        lastFailure: 0
       });
     }
 
     const status = this.proxyStatus.get(proxy);
-    const now = Date.now();
     
     if (success) {
       status.successes++;
-      status.failures = Math.max(0, status.failures - 1);
-      status.lastSuccess = now;
-      if (status.successes >= this.successThreshold) {
-        status.totalFailures = Math.max(0, status.totalFailures - 1);
-      }
+      status.failures = 0;
     } else {
       status.failures++;
       status.successes = 0;
-      status.lastFailure = now;
-      status.totalFailures++;
+      status.lastFailure = Date.now();
     }
   }
 
@@ -44,30 +35,19 @@ export class ProxyManager {
     const status = this.proxyStatus.get(proxy);
     if (!status) return true;
 
-    // 检查短期失败
     if (status.failures >= this.failureThreshold) {
       const timeSinceLastFailure = Date.now() - status.lastFailure;
       if (timeSinceLastFailure < this.retryTimeout) {
         return false;
       }
-      // 重置失败计数
-      status.failures = Math.max(0, status.failures - 1);
+      this.proxyStatus.set(proxy, {
+        failures: 0,
+        successes: 0,
+        lastFailure: 0
+      });
     }
-
-    // 检查总失败次数
-    if (status.totalFailures >= this.maxFailures) {
-      const timeSinceLastFailure = Date.now() - status.lastFailure;
-      if (timeSinceLastFailure < this.retryTimeout * 2) {
-        return false;
-      }
-      // 逐步减少总失败计数
-      status.totalFailures = Math.max(0, status.totalFailures - 1);
-    }
-
+    
     return true;
   }
-
-  resetProxy(proxy) {
-    this.proxyStatus.delete(proxy);
-  }
 }
+#1
