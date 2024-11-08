@@ -37,17 +37,8 @@ async function main() {
     await Promise.all(clients.map(client => client.start()));
   } catch (error) {
     logger.error(`Error: ${error.message}`);
-    await new Promise(resolve => setTimeout(resolve, 10000));
-    main();
+    process.exit(1);
   }
 }
-
-process.on('uncaughtException', (error) => {
-  logger.error(`Uncaught Exception: ${error.message}`);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
-});
 
 main();
