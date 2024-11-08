@@ -25,7 +25,7 @@ async function loadConfig() {
   }
 }
 
-async function startClient() {
+async function main() {
   try {
     console.clear();
     logger.info('🌿 Grass Node Starting...\n');
@@ -35,63 +35,23 @@ async function startClient() {
     
     const clients = proxies.map(proxy => new GrassClient(userId, proxy));
     
-    // 监控所有客户端连接
-    const monitor = setInterval(() => {
-      let activeConnections = clients.filter(client => client.isConnected).length;
-      logger.info(`Active connections: ${activeConnections}/${clients.length}`);
-      
-      // 如果有断开的连接，尝试重新连接
-      clients.forEach(client => {
-        if (!client.isConnected) {
-          client.start().catch(() => {});
-        }
-      });
-    }, 30000); // 每30秒检查一次
-
-    // 启动所有客户端
+    // 启动所有客户端并保持运行
     await Promise.all(clients.map(client => client.start()));
-
-    return monitor;
   } catch (error) {
     logger.error(`Error: ${error.message}`);
-    throw error;
+    // 不要退出进程，等待5秒后重试
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    main();
   }
 }
 
-async function main() {
-  let monitor;
-  
-  const restart = async () => {
-    if (monitor) clearInterval(monitor);
-    try {
-      monitor = await startClient();
-    } catch (error) {
-      logger.error(`Failed to start clients: ${error.message}`);
-      logger.info('Retrying in 30 seconds...');
-      setTimeout(restart, 30000);
-    }
-  };
+// 捕获未处理的异常，防止程序崩溃
+process.on('uncaughtException', (error) => {
+  logger.error(`Uncaught Exception: ${error.message}`);
+});
 
-  // 启动主程序
-  await restart();
-
-  // 处理未捕获的异常
-  process.on('uncaughtException', (error) => {
-    logger.error(`Uncaught Exception: ${error.message}`);
-    restart();
-  });
-
-  process.on('unhandledRejection', (reason, promise) => {
-    logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
-    restart();
-  });
-
-  // 优雅退出
-  process.on('SIGINT', async () => {
-    logger.info('Shutting down gracefully...');
-    if (monitor) clearInterval(monitor);
-    process.exit(0);
-  });
-}
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
+});
 
 main();
