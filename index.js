@@ -37,13 +37,11 @@ async function main() {
     await Promise.all(clients.map(client => client.start()));
   } catch (error) {
     logger.error(`Error: ${error.message}`);
-    // 等待10秒后重试
     await new Promise(resolve => setTimeout(resolve, 10000));
     main();
   }
 }
 
-// 捕获未处理的异常，防止程序崩溃
 process.on('uncaughtException', (error) => {
   logger.error(`Uncaught Exception: ${error.message}`);
 });
