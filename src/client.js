@@ -1,8 +1,7 @@
 import WebSocket from 'ws';
 import { v4 as uuidv4 } from 'uuid';
-import pkg from 'https-proxy-agent';
-const { HttpsProxyAgent } = pkg;
 import { logger } from './logger.js';
+import { Agent } from 'https';
 
 export class GrassClient {
   constructor(userId, proxy = null) {
@@ -11,31 +10,66 @@ export class GrassClient {
     this.ws = null;
     this.browserId = uuidv4();
     this.heartbeatInterval = null;
+    this.reconnectTimeout = null;
+    this.isAuthenticated = false;
+    this.connectionAttempts = 0;
+    this.maxRetries = 10;
+    this.backoffDelay = 1000;
+    this.maxBackoffDelay = 30000;
+    this.isShuttingDown = false;
   }
 
   async start() {
-    while (true) {
+    process.on('SIGINT', () => this.shutdown());
+    process.on('SIGTERM', () => this.shutdown());
+    
+    while (!this.isShuttingDown) {
       try {
+        if (this.connectionAttempts >= this.maxRetries) {
+          logger.warn(`Maximum retry attempts (${this.maxRetries}) reached for proxy: ${this.proxy}`);
+          this.connectionAttempts = 0;
+          await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
+          continue;
+        }
+
         await this.connect();
         await this.authenticate();
         this.startHeartbeat();
-        
-        // 等待连接关闭
+        this.connectionAttempts = 0;
+
         await new Promise((resolve) => {
           this.ws.once('close', () => {
             logger.warn(`Connection closed for proxy: ${this.proxy}`);
             resolve();
           });
         });
-        
-        this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 10000));
+
       } catch (error) {
-        logger.error(`Connection error: ${error.message}`);
+        this.connectionAttempts++;
+        const delay = Math.min(this.backoffDelay * Math.pow(2, this.connectionAttempts - 1), this.maxBackoffDelay);
+        
+        if (error.message.includes('404')) {
+          logger.error(`Server endpoint not found (404). Waiting longer before retry...`);
+          await new Promise(resolve => setTimeout(resolve, this.maxBackoffDelay));
+        } else {
+          const errorMessage = this.getErrorMessage(error);
+          logger.error(`Connection error (attempt ${this.connectionAttempts}): ${errorMessage}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      } finally {
         this.cleanup();
-        await new Promise(resolve => setTimeout(resolve, 10000));
       }
     }
+  }
+
+  getErrorMessage(error) {
+    if (error.code === 'ECONNRESET') {
+      return 'Connection reset by peer';
+    }
+    if (error.code === 'ETIMEDOUT') {
+      return 'Connection timed out';
+    }
+    return error.message;
   }
 
   async connect() {
@@ -50,33 +84,52 @@ export class GrassClient {
         'Origin': 'https://app.getgrass.io',
         'Sec-WebSocket-Version': '13',
         'Accept-Language': 'en-US,en;q=0.9'
-      }
+      },
+      timeout: 30000,
+      followRedirects: true,
+      maxPayload: 1024 * 1024,
+      rejectUnauthorized: false,
+      agent: new Agent({
+        rejectUnauthorized: false,
+        keepAlive: true,
+        timeout: 30000
+      })
     };
 
     if (this.proxy) {
-      options.agent = new HttpsProxyAgent(this.proxy);
+      options.proxy = this.proxy;
     }
 
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket('wss://proxy2.wynd.network:4650', options);
+      try {
+        this.ws = new WebSocket('wss://proxy2.wynd.network:4650', options);
 
-      const timeout = setTimeout(() => {
-        if (this.ws) {
-          this.ws.terminate();
-        }
-        reject(new Error('Connection timeout'));
-      }, 30000);
+        const connectionTimeout = setTimeout(() => {
+          if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+            this.ws.terminate();
+            reject(new Error('Connection timeout'));
+          }
+        }, 30000);
 
-      this.ws.once('open', () => {
-        clearTimeout(timeout);
-        logger.info(`Connected via proxy: ${this.proxy}`);
-        resolve();
-      });
+        this.ws.once('open', () => {
+          clearTimeout(connectionTimeout);
+          logger.info(`Connected via proxy: ${this.proxy}`);
+          resolve();
+        });
 
-      this.ws.once('error', (error) => {
-        clearTimeout(timeout);
+        this.ws.once('error', (error) => {
+          clearTimeout(connectionTimeout);
+          reject(error);
+        });
+
+        this.ws.on('unexpected-response', (request, response) => {
+          clearTimeout(connectionTimeout);
+          reject(new Error(`Unexpected server response: ${response.statusCode}`));
+        });
+
+      } catch (error) {
         reject(error);
-      });
+      }
     });
   }
 
@@ -91,6 +144,7 @@ export class GrassClient {
         try {
           const response = JSON.parse(data.toString());
           await this.sendAuthPayload(response.id);
+          this.isAuthenticated = true;
           logger.info('Authentication successful');
           resolve();
         } catch (error) {
@@ -136,6 +190,7 @@ export class GrassClient {
           });
         } catch (error) {
           logger.error(`Heartbeat failed: ${error.message}`);
+          this.cleanup();
         }
       }
     }, 30000);
@@ -147,7 +202,12 @@ export class GrassClient {
         return reject(new Error('WebSocket not connected'));
       }
 
+      const timeout = setTimeout(() => {
+        reject(new Error('Send message timeout'));
+      }, 10000);
+
       this.ws.send(JSON.stringify(payload), (error) => {
+        clearTimeout(timeout);
         if (error) reject(error);
         else resolve();
       });
@@ -159,7 +219,12 @@ export class GrassClient {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
-    
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+
     if (this.ws) {
       this.ws.removeAllListeners();
       if (this.ws.readyState === WebSocket.OPEN) {
@@ -167,5 +232,12 @@ export class GrassClient {
       }
       this.ws = null;
     }
+
+    this.isAuthenticated = false;
+  }
+
+  shutdown() {
+    this.isShuttingDown = true;
+    this.cleanup();
   }
 }
